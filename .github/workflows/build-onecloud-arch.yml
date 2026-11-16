@@ -32,7 +32,11 @@ permissions:
 env:
   BOARD: onecloud
   BRANCH: current
-  ARCH_ROOTFS_URL: https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+  ARCH_ROOTFS_URLS: >-
+    https://mirrors.ustc.edu.cn/archlinuxarm/os/ArchLinuxARM-aarch64-latest.tar.gz
+    https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/os/ArchLinuxARM-aarch64-latest.tar.gz
+    https://mirror.archlinuxarm.org/aarch64/os/ArchLinuxARM-aarch64-latest.tar.gz
+    http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
   UBOOT_REPO: hzyitc/u-boot-onecloud
   UBOOT_TAG: latest
   UBOOT_BURNIMG: eMMC.burn.img
@@ -83,20 +87,29 @@ jobs:
       - name: 下载 ArchLinuxARM aarch64 根文件系统
         run: |
           set -euo pipefail
-          URL="${{ env.ARCH_ROOTFS_URL }}"
-          for i in 1 2 3 4 5; do
-            echo "尝试下载 ArchLinuxARM rootfs（第 ${i} 次）: ${URL}"
-            if curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 -o arch-rootfs.tar.gz "${URL}"; then
-              break
-            fi
-            echo "下载失败，等待重试..."
-            sleep 10
-            if [ "$i" -eq 5 ]; then
-              echo "::error::无法下载 ArchLinuxARM rootfs: ${URL}"
-              exit 1
-            fi
+          URLS="${{ env.ARCH_ROOTFS_URLS }}"
+          ok=0
+          for url in $URLS; do
+            for i in 1 2 3; do
+              echo "尝试下载 ArchLinuxARM rootfs（$i/3）: $url"
+              rm -f arch-rootfs.tar.gz
+              if curl -fL --retry 2 --retry-delay 5 --connect-timeout 20 --max-time 1800 -o arch-rootfs.tar.gz "$url"; then
+                if tar -tzf arch-rootfs.tar.gz >/dev/null 2>&1; then
+                  echo "下载成功: $url"
+                  ok=1
+                  break 2
+                fi
+                echo "校验失败（非有效 tar.gz），尝试下一个源..."
+              else
+                echo "下载失败，稍后重试..."
+                sleep 5
+              fi
+            done
           done
-          tar -tzf arch-rootfs.tar.gz >/dev/null
+          if [ "$ok" -ne 1 ]; then
+            echo "::error::无法从所有备用源下载 ArchLinuxARM rootfs"
+            exit 1
+          fi
           ls -lh arch-rootfs.tar.gz
 
       - name: 编译 Armbian 镜像框架（内核 / u-boot / dtb / 分区布局）
