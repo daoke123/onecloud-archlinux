@@ -319,16 +319,6 @@ jobs:
           } > RELEASE_NOTES.md
           cat RELEASE_NOTES.md
 
-      - name: 上传构建产物到 Artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: onecloud-arch-burn
-          path: |
-            build/output/images/${{ env.IMG_BASENAME }}.burn.img.gz
-            build/output/images/SHA256SUMS.txt
-            build/output/images/RELEASE_NOTES.md
-          retention-days: 30
-
       - name: 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
