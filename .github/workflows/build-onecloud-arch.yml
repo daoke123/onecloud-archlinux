@@ -71,7 +71,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             git curl wget ca-certificates \
             qemu-user-static binfmt-support \
-            kpartx dosfstools e2fsprogs \
+            kpartx parted dosfstools e2fsprogs \
             android-sdk-libsparse-utils \
             rsync file gzip
           sudo apt-get clean
@@ -140,6 +140,19 @@ jobs:
             exit 1
           fi
           echo "基础镜像: $IMG"
+
+          # 扩容镜像与 root 分区，避免 ArchLinuxARM rootfs 解压空间不足
+          echo "扩容镜像（+2G）..."
+          truncate -s +2G "$IMG"
+          LOOPDEV=$(sudo losetup --find --show --partscan "$IMG")
+          sudo partprobe "$LOOPDEV" || true
+          sleep 1
+          sudo parted -s "$LOOPDEV" resizepart 2 100% || sudo parted -s "$LOOPDEV" ---pretend-input-tty resizepart 2 100% yes || true
+          sudo partprobe "$LOOPDEV" || true
+          sleep 1
+          sudo e2fsck -fy "${LOOPDEV}p2" || true
+          sudo resize2fs "${LOOPDEV}p2"
+          sudo losetup -d "$LOOPDEV"
 
           cleanup() {
             set +e
