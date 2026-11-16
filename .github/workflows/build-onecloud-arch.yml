@@ -124,7 +124,8 @@ jobs:
             BUILD_DESKTOP=no \
             KERNEL_CONFIGURE=no \
             COMPRESS_OUTPUTIMAGE=img \
-            EXPERT=yes
+            EXPERT=yes \
+            ARCH=armhf
           sudo chown -R "$(id -u):$(id -g)" output/
           # 尽早清理构建中间产物以节省空间
           sudo rm -rf .tmp cache/rootfs cache/sources 2>/dev/null || true
