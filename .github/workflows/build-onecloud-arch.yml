@@ -201,8 +201,8 @@ jobs:
             | sudo tee /mnt/arch/etc/fstab >/dev/null
 
           echo "onecloud-arch" | sudo tee /mnt/arch/etc/hostname >/dev/null
-          # 国内镜像源
-          echo 'Server = https://mirrors.ustc.edu.cn/archlinuxarm/$arch/$repo' | sudo tee /mnt/arch/etc/pacman.d/mirrorlist >/dev/null
+          # 国内镜像源（直接使用 armv7h，避免 pacman 在 chroot 中 $arch 未展开）
+          echo 'Server = https://mirrors.ustc.edu.cn/archlinuxarm/armv7h/$repo' | sudo tee /mnt/arch/etc/pacman.d/mirrorlist >/dev/null
 
           # chroot 初始化（设置 root 空密码、启用 sshd）
           sudo cp /usr/bin/qemu-arm-static /mnt/arch/usr/bin/
