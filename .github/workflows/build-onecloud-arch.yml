@@ -48,16 +48,21 @@ jobs:
       - name: 扩容磁盘
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 10240
+          root-reserve-mb: 6144
           swap-size-mb: 4096
           remove-dotnet: "true"
           remove-android: "true"
           remove-haskell: "true"
           remove-codeql: "true"
           remove-docker-images: "true"
+          overprovision-lvm: "true"
 
       - name: 安装依赖
         run: |
+          # 清理 apt 缓存并减少索引占用，避免根分区空间不足
+          sudo rm -rf /var/lib/apt/lists/*
+          echo 'Acquire::Languages "none";' | sudo tee /etc/apt/apt.conf.d/99nolanguages >/dev/null
+          sudo apt-get clean
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             git curl wget ca-certificates \
@@ -65,6 +70,7 @@ jobs:
             kpartx dosfstools e2fsprogs \
             android-sdk-libsparse-utils \
             rsync xz-utils file
+          sudo apt-get clean
           # AmlImg 用于打包 Amlogic 线刷包
           curl -L -o ./AmlImg https://github.com/hzyitc/AmlImg/releases/download/v0.3.1/AmlImg_v0.3.1_linux_amd64
           chmod +x ./AmlImg
