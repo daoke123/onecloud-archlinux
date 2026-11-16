@@ -82,7 +82,21 @@ jobs:
 
       - name: 下载 ArchLinuxARM aarch64 根文件系统
         run: |
-          wget -q --show-progress -O arch-rootfs.tar.gz "${{ env.ARCH_ROOTFS_URL }}"
+          set -euo pipefail
+          URL="${{ env.ARCH_ROOTFS_URL }}"
+          for i in 1 2 3 4 5; do
+            echo "尝试下载 ArchLinuxARM rootfs（第 ${i} 次）: ${URL}"
+            if curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 -o arch-rootfs.tar.gz "${URL}"; then
+              break
+            fi
+            echo "下载失败，等待重试..."
+            sleep 10
+            if [ "$i" -eq 5 ]; then
+              echo "::error::无法下载 ArchLinuxARM rootfs: ${URL}"
+              exit 1
+            fi
+          done
+          tar -tzf arch-rootfs.tar.gz >/dev/null
           ls -lh arch-rootfs.tar.gz
 
       - name: 编译 Armbian 镜像框架（内核 / u-boot / dtb / 分区布局）
