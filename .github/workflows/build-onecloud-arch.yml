@@ -73,7 +73,7 @@ jobs:
             qemu-user-static binfmt-support \
             kpartx dosfstools e2fsprogs \
             android-sdk-libsparse-utils \
-            rsync file xz-utils
+            rsync file gzip
           sudo apt-get clean
           # AmlImg 用于打包 Amlogic 线刷包
           curl -L -o ./AmlImg https://github.com/hzyitc/AmlImg/releases/download/v0.3.1/AmlImg_v0.3.1_linux_amd64
@@ -247,15 +247,15 @@ jobs:
           rm -f "$IMG"
           sudo rm -rf build/.tmp build/cache build/output/debs 2>/dev/null || true
 
-          xz -T0 -6 "$BURN_IMG"
-          echo "BURN_IMG=${BURN_IMG}.xz" >> "$GITHUB_ENV"
+          gzip -f -9 "$BURN_IMG"
+          echo "BURN_IMG=${BURN_IMG}.gz" >> "$GITHUB_ENV"
           ls -lh "$OUT_DIR"
 
       - name: 生成校验与 Release 说明
         run: |
           set -euo pipefail
           cd build/output/images
-          sha256sum "${IMG_BASENAME}.burn.img.xz" > SHA256SUMS.txt
+          sha256sum "${IMG_BASENAME}.burn.img.gz" > SHA256SUMS.txt
           ls -lh
           cat SHA256SUMS.txt
           {
@@ -272,7 +272,7 @@ jobs:
             echo
             echo "| 文件 | 说明 |"
             echo "| --- | --- |"
-            echo "| \`${IMG_BASENAME}.burn.img.xz\` | eMMC 线刷包（xz 压缩），解压后用 Amlogic USB Burning Tool v2.1.3 烧录 |"
+            echo "| \`${IMG_BASENAME}.burn.img.gz\` | eMMC 线刷包（gzip 压缩），解压后用 Amlogic USB Burning Tool v2.1.3 烧录 |"
             echo "| \`SHA256SUMS.txt\` | SHA256 校验值 |"
             echo
             echo "## 文件校验值"
@@ -288,7 +288,7 @@ jobs:
             echo "- 串口：\`ttyAML0,115200n8\`"
             echo
             echo "## eMMC 线刷方式"
-            echo "1. 下载并解压 \`${IMG_BASENAME}.burn.img.xz\` 得到 \`${IMG_BASENAME}.burn.img\`"
+            echo "1. 下载并解压 \`${IMG_BASENAME}.burn.img.gz\` 得到 \`${IMG_BASENAME}.burn.img\`"
             echo "2. 使用 Amlogic USB Burning Tool **v2.1.3** 导入 \`.burn.img\`"
             echo "3. 勾选擦除 flash / 擦除 bootloader，短接进入升级模式后烧录"
             echo "4. eMMC 启动时 root 分区为 \`/dev/mmcblk1p2\`"
@@ -296,7 +296,7 @@ jobs:
             echo "## 说明"
             echo
             echo "- 本构建为**仅 burn 线刷包**的低空间开销版本，不包含 SD/U 盘镜像。"
-            echo "- Release 中的 burn 包已压缩为 \`.xz\` 以减小体积，烧录前需先解压。"
+            echo "- Release 中的 burn 包已压缩为 \`.gz\` 以减小体积，烧录前需先解压。"
             echo
             echo "## 已知注意事项"
             echo
@@ -311,7 +311,7 @@ jobs:
         with:
           name: onecloud-arch-burn
           path: |
-            build/output/images/${{ env.IMG_BASENAME }}.burn.img.xz
+            build/output/images/${{ env.IMG_BASENAME }}.burn.img.gz
             build/output/images/SHA256SUMS.txt
             build/output/images/RELEASE_NOTES.md
           retention-days: 30
@@ -324,6 +324,6 @@ jobs:
           body_path: build/output/images/RELEASE_NOTES.md
           prerelease: ${{ github.event.inputs.PRERELEASE }}
           files: |
-            build/output/images/${{ env.IMG_BASENAME }}.burn.img.xz
+            build/output/images/${{ env.IMG_BASENAME }}.burn.img.gz
             build/output/images/SHA256SUMS.txt
             build/output/images/RELEASE_NOTES.md
