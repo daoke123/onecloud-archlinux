@@ -1,4 +1,4 @@
-name: Build OneCloud ArchLinux (SD + Burn 线刷包)
+name: Build OneCloud ArchLinux (Burn 线刷包)
 
 on:
   workflow_dispatch:
@@ -12,7 +12,7 @@ on:
           - bookworm
           - noble
       BUILD_MINIMAL:
-        description: 构建最小化镜像（推荐 yes，加快编译）
+        description: 构建最小化镜像（推荐 yes，加快编译并节省空间）
         default: "yes"
         type: choice
         options:
@@ -48,7 +48,7 @@ jobs:
       - name: 扩容磁盘
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 6144
+          root-reserve-mb: 4096
           swap-size-mb: 4096
           remove-dotnet: "true"
           remove-android: "true"
@@ -69,7 +69,7 @@ jobs:
             qemu-user-static binfmt-support \
             kpartx dosfstools e2fsprogs \
             android-sdk-libsparse-utils \
-            rsync xz-utils file
+            rsync file
           sudo apt-get clean
           # AmlImg 用于打包 Amlogic 线刷包
           curl -L -o ./AmlImg https://github.com/hzyitc/AmlImg/releases/download/v0.3.1/AmlImg_v0.3.1_linux_amd64
@@ -99,8 +99,10 @@ jobs:
             COMPRESS_OUTPUTIMAGE=img \
             EXPERT=yes
           sudo chown -R "$(id -u):$(id -g)" output/
+          # 尽早清理构建中间产物以节省空间
+          sudo rm -rf .tmp cache/rootfs cache/sources 2>/dev/null || true
 
-      - name: 替换 SD 镜像 rootfs 为 ArchLinuxARM
+      - name: 替换镜像 rootfs 为 ArchLinuxARM（用于生成 burn 包）
         run: |
           set -euo pipefail
 
@@ -110,7 +112,7 @@ jobs:
             ls -R build/output || true
             exit 1
           fi
-          echo "SD 镜像: $IMG"
+          echo "基础镜像: $IMG"
 
           cleanup() {
             set +e
@@ -144,11 +146,12 @@ jobs:
 
           # 解压 ArchLinuxARM rootfs
           sudo tar -xpf arch-rootfs.tar.gz -C /mnt/arch
+          rm -f arch-rootfs.tar.gz
 
-          # fstab（SD 卡启动：mmcblk0）
+          # fstab（eMMC 线刷启动：mmcblk1）
           printf '%s\n' \
-            '/dev/mmcblk0p2  /      ext4  defaults,noatime  0 1' \
-            '/dev/mmcblk0p1  /boot  vfat  defaults          0 2' \
+            '/dev/mmcblk1p2  /      ext4  defaults,noatime  0 1' \
+            '/dev/mmcblk1p1  /boot  vfat  defaults          0 2' \
             | sudo tee /mnt/arch/etc/fstab >/dev/null
 
           echo "onecloud-arch" | sudo tee /mnt/arch/etc/hostname >/dev/null
@@ -193,23 +196,11 @@ jobs:
           curl -L -o "$WORKDIR/uboot.img" "https://github.com/${UBOOT_REPO}/releases/download/${UBOOT_TAG}/${UBOOT_BURNIMG}"
           (cd "$WORKDIR" && AmlImg unpack ./uboot.img burn)
 
-          # 线刷写入 eMMC，root 分区应为 mmcblk1；临时修改 fstab 后再导出分区
+          # 从已替换 rootfs 的镜像提取分区并转换为 sparse
           LOOPDEV=$(sudo losetup --find --show --partscan "$IMG")
           sleep 2
-          sudo mkdir -p /mnt/burnroot
-          sudo mount "${LOOPDEV}p2" /mnt/burnroot
-          sudo sed -i 's|/dev/mmcblk0p2|/dev/mmcblk1p2|g; s|/dev/mmcblk0p1|/dev/mmcblk1p1|g' /mnt/burnroot/etc/fstab
-          sync
-          sudo umount /mnt/burnroot
-
           sudo img2simg "${LOOPDEV}p1" "$WORKDIR/burn/boot.simg"
           sudo img2simg "${LOOPDEV}p2" "$WORKDIR/burn/rootfs.simg"
-
-          # 恢复为 SD 启动用 fstab（mmcblk0）
-          sudo mount "${LOOPDEV}p2" /mnt/burnroot
-          sudo sed -i 's|/dev/mmcblk1p2|/dev/mmcblk0p2|g; s|/dev/mmcblk1p1|/dev/mmcblk0p1|g' /mnt/burnroot/etc/fstab
-          sync
-          sudo umount /mnt/burnroot
           sudo losetup -d "$LOOPDEV"
           sudo chown "$(id -u):$(id -g)" "$WORKDIR"/burn/*.simg
 
@@ -220,27 +211,26 @@ jobs:
             printf 'PARTITION:boot:sparse:boot.simg\nVERIFY:boot:normal:boot.VERIFY\nPARTITION:rootfs:sparse:rootfs.simg\nVERIFY:rootfs:normal:rootfs.VERIFY\n' >> commands.txt)
 
           OUT_DIR="build/output/images"
+          mkdir -p "$OUT_DIR"
           BURN_IMG="${OUT_DIR}/${IMG_BASENAME}.burn.img"
           AmlImg pack "$BURN_IMG" "$WORKDIR/burn"
           echo "BURN_IMG=$BURN_IMG" >> "$GITHUB_ENV"
+
+          # 清理中间文件，仅保留 burn 包产物
+          rm -rf "$WORKDIR"
+          rm -f "$IMG"
+          sudo rm -rf build/.tmp build/cache build/output/debs 2>/dev/null || true
           ls -lh "$OUT_DIR"
 
-      - name: 压缩镜像并生成校验
+      - name: 生成校验与 Release 说明
         run: |
           set -euo pipefail
           cd build/output/images
-          # 压缩 SD 镜像
-          xz -T0 -9 -k "${IMG_BASENAME}.img"
-          # 生成校验（对发布文件）
-          sha256sum "${IMG_BASENAME}.img.xz" "${IMG_BASENAME}.burn.img" > SHA256SUMS.txt
+          sha256sum "${IMG_BASENAME}.burn.img" > SHA256SUMS.txt
           ls -lh
           cat SHA256SUMS.txt
-
-      - name: 生成 Release 说明
-        run: |
-          cd build/output/images
           {
-            echo "# 玩客云 OneCloud ArchLinuxARM 固件"
+            echo "# 玩客云 OneCloud ArchLinuxARM 固件（仅 Burn 线刷包）"
             echo
             echo "- 设备：玩客云（Amlogic S805 / meson8b，AArch64）"
             echo "- 系统：ArchLinuxARM aarch64（官方 rootfs）"
@@ -253,7 +243,6 @@ jobs:
             echo
             echo "| 文件 | 说明 |"
             echo "| --- | --- |"
-            echo "| \`${IMG_BASENAME}.img.xz\` | SD / U 盘启动镜像，解压后用 balenaEtcher / Rufus 写入 |"
             echo "| \`${IMG_BASENAME}.burn.img\` | eMMC 线刷包，用 Amlogic USB Burning Tool v2.1.3 烧录 |"
             echo "| \`SHA256SUMS.txt\` | SHA256 校验值 |"
             echo
@@ -269,17 +258,15 @@ jobs:
             echo "- SSH 已开启；首次登录后请立即执行 \`passwd root\`"
             echo "- 串口：\`ttyAML0,115200n8\`"
             echo
-            echo "## 刷机方式"
-            echo
-            echo "### SD / U 盘启动"
-            echo "1. 解压 \`.img.xz\` 得到 \`.img\`"
-            echo "2. 用 balenaEtcher 写入 SD 卡 / U 盘，上电启动"
-            echo "3. SD 启动时 root 分区为 \`/dev/mmcblk0p2\`"
-            echo
-            echo "### eMMC 线刷"
+            echo "## eMMC 线刷方式"
             echo "1. 使用 Amlogic USB Burning Tool **v2.1.3** 导入 \`.burn.img\`"
             echo "2. 勾选擦除 flash / 擦除 bootloader，短接进入升级模式后烧录"
             echo "3. eMMC 启动时 root 分区为 \`/dev/mmcblk1p2\`"
+            echo
+            echo "## 说明"
+            echo
+            echo "- 本构建为**仅 burn 线刷包**的低空间开销版本，不包含 SD/U 盘镜像（\`.img.xz\`）。"
+            echo "- 如需 SD 卡启动，请使用包含 SD 镜像的构建版本。"
             echo
             echo "## 已知注意事项"
             echo
@@ -292,9 +279,8 @@ jobs:
       - name: 上传构建产物到 Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: onecloud-arch-firmware
+          name: onecloud-arch-burn
           path: |
-            build/output/images/${{ env.IMG_BASENAME }}.img.xz
             build/output/images/${{ env.IMG_BASENAME }}.burn.img
             build/output/images/SHA256SUMS.txt
             build/output/images/RELEASE_NOTES.md
@@ -303,12 +289,11 @@ jobs:
       - name: 发布到 GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: onecloud-arch-${{ github.run_number }}
-          name: "OneCloud ArchLinuxARM #${{ github.run_number }}"
+          tag_name: onecloud-arch-burn-${{ github.run_number }}
+          name: "OneCloud ArchLinuxARM Burn #${{ github.run_number }}"
           body_path: build/output/images/RELEASE_NOTES.md
           prerelease: ${{ github.event.inputs.PRERELEASE }}
           files: |
-            build/output/images/${{ env.IMG_BASENAME }}.img.xz
             build/output/images/${{ env.IMG_BASENAME }}.burn.img
             build/output/images/SHA256SUMS.txt
             build/output/images/RELEASE_NOTES.md
