@@ -156,9 +156,14 @@ jobs:
 
           cleanup() {
             set +e
-            if mountpoint -q /mnt/arch/boot 2>/dev/null; then sudo umount /mnt/arch/boot; fi
-            if mountpoint -q /mnt/arch 2>/dev/null; then sudo umount /mnt/arch; fi
-            if [ -n "${LOOPDEV:-}" ]; then sudo kpartx -dv "$LOOPDEV" 2>/dev/null || true; sudo losetup -d "$LOOPDEV" 2>/dev/null || true; fi
+            sync
+            for m in /mnt/arch/sys /mnt/arch/proc /mnt/arch/dev/pts /mnt/arch/dev /mnt/arch/boot /mnt/arch; do
+              if mountpoint -q "$m" 2>/dev/null; then sudo umount -l "$m" 2>/dev/null || sudo umount "$m" 2>/dev/null || true; fi
+            done
+            if [ -n "${LOOPDEV:-}" ]; then
+              sudo kpartx -dv "$LOOPDEV" 2>/dev/null || true
+              sudo losetup -d "$LOOPDEV" 2>/dev/null || true
+            fi
           }
           trap cleanup EXIT
 
@@ -206,6 +211,13 @@ jobs:
           sudo mount -t sysfs sys /mnt/arch/sys
           sudo rm -f /mnt/arch/etc/resolv.conf
           echo "nameserver 223.5.5.5" | sudo tee /mnt/arch/etc/resolv.conf >/dev/null
+
+          # 新版 pacman 在无 Landlock/沙箱能力的环境（如 Runner+chroot）可能失败
+          if grep -q '^\[options\]' /mnt/arch/etc/pacman.conf; then
+            sudo sed -i '/^\[options\]/a DisableSandbox' /mnt/arch/etc/pacman.conf
+          else
+            printf '\n[options]\nDisableSandbox\n' | sudo tee -a /mnt/arch/etc/pacman.conf >/dev/null
+          fi
 
           sudo chroot /mnt/arch /usr/bin/qemu-aarch64-static /bin/bash -euc \
             'pacman-key --init; pacman-key --populate archlinuxarm; pacman -Sy --noconfirm --needed openssh; systemctl enable sshd; passwd -d root'
