@@ -140,10 +140,10 @@ jobs:
           sudo tar -xpf arch-rootfs.tar.gz -C /mnt/arch
 
           # fstab（SD 卡启动：mmcblk0）
-          cat <<'EOF' | sudo tee /mnt/arch/etc/fstab >/dev/null
-/dev/mmcblk0p2  /      ext4  defaults,noatime  0 1
-/dev/mmcblk0p1  /boot  vfat  defaults          0 2
-EOF
+          printf '%s\n' \
+            '/dev/mmcblk0p2  /      ext4  defaults,noatime  0 1' \
+            '/dev/mmcblk0p1  /boot  vfat  defaults          0 2' \
+            | sudo tee /mnt/arch/etc/fstab >/dev/null
 
           echo "onecloud-arch" | sudo tee /mnt/arch/etc/hostname >/dev/null
           # 国内镜像源
@@ -158,14 +158,8 @@ EOF
           sudo rm -f /mnt/arch/etc/resolv.conf
           echo "nameserver 223.5.5.5" | sudo tee /mnt/arch/etc/resolv.conf >/dev/null
 
-          sudo chroot /mnt/arch /usr/bin/qemu-aarch64-static /bin/bash -euc '
-            pacman-key --init
-            pacman-key --populate archlinuxarm
-            # 安装 openssh（基础包不一定包含/启用）
-            pacman -Sy --noconfirm --needed openssh
-            systemctl enable sshd
-            passwd -d root
-          '
+          sudo chroot /mnt/arch /usr/bin/qemu-aarch64-static /bin/bash -euc \
+            'pacman-key --init; pacman-key --populate archlinuxarm; pacman -Sy --noconfirm --needed openssh; systemctl enable sshd; passwd -d root'
 
           sudo rm -f /mnt/arch/usr/bin/qemu-aarch64-static
           sudo rm -f /mnt/arch/etc/resolv.conf
