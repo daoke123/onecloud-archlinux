@@ -10,9 +10,9 @@
 
 | 文件 | 说明 |
 | --- | --- |
-| `*.img.gz` | SD / U 盘启动镜像，写入存储卡后从外部存储引导 |
+| `*.img.xz` | SD / U 盘启动镜像，解压后写入存储卡从外部存储引导 |
 | `*.burn.img` | eMMC 线刷包，使用 Amlogic USB Burning Tool 烧录到内置存储 |
-| `SHA256SUMS.txt` | 全部固件的 SHA256 校验值 |
+| `SHA256SUMS.txt` | 固件的 SHA256 校验值 |
 | `RELEASE_NOTES.md` | 本次构建的说明文档（版本信息、校验值、刷机步骤） |
 
 ## 目录结构
@@ -37,15 +37,14 @@
    - `PRERELEASE`：是否标记为预发布。
 4. 编译约 40～90 分钟，完成后在仓库 **Releases** 页面下载固件。
 
-> GitHub Runner 默认磁盘较小，工作流第一步已自动扩容并分配 4G swap；如编译中途磁盘不足，
-> 可调大 `root-reserve-mb` 与 `swap-size-mb`。
+> GitHub Runner 默认磁盘较小，工作流已自动扩容并分配 swap；如编译中途磁盘不足，可在工作流中调大 `root-reserve-mb` 与 `swap-size-mb`。
 
 ## 刷机方式
 
 ### 方式一：SD / U 盘启动（推荐先验证）
 
-1. 从 Release 下载 `*.img.gz` 并解压。
-2. 用 [balenaEtcher](https://balena.io/etcher) 或 Rufus 将镜像写入 SD 卡 / U 盘。
+1. 从 Release 下载 `*.img.xz` 并解压。
+2. 用 [balenaEtcher](https://balena.io/etcher) 或 Rufus 将解压后的 `.img` 写入 SD 卡 / U 盘。
 3. 插入玩客云，上电引导。
 
 ### 方式二：eMMC 线刷（burn.img）

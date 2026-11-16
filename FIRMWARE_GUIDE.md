@@ -15,8 +15,8 @@
 
 在仓库 **Releases** 页面下载最新版本：
 
-- `*-onecloud-archlinux-*.img.gz`：SD / U 盘镜像
-- `*-onecloud-archlinux-*.burn.img`：eMMC 线刷包
+- `*.img.xz`：SD / U 盘镜像（需先解压）
+- `*.burn.img`：eMMC 线刷包
 - `SHA256SUMS.txt`：校验值
 
 下载后先校验完整性：
@@ -26,12 +26,12 @@
 sha256sum -c SHA256SUMS.txt
 
 # Windows（PowerShell）
-Get-FileHash *.img.gz -Algorithm SHA256
+Get-FileHash *.img.xz -Algorithm SHA256
 ```
 
 ## 三、方式一：SD / U 盘启动
 
-1. 解压 `*.img.gz` 得到 `.img` 文件。
+1. 解压 `*.img.xz` 得到 `.img` 文件（例如 `xz -d *.img.xz` 或使用 7-Zip）。
 2. 打开 [balenaEtcher](https://balena.io/etcher)：
    - Flash from file：选择解压后的 `.img`
    - Select target：选择 SD 卡 / U 盘

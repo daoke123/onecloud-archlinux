@@ -4,18 +4,20 @@ on:
   workflow_dispatch:
     inputs:
       RELEASE:
-        description: Armbian 基础版本（仅作编译框架，rootfs 最终替换为 ArchLinuxARM）
+        description: Armbian 基础版本（编译镜像框架用，rootfs 最终替换为 ArchLinuxARM）
         default: trixie
         type: choice
         options:
           - trixie
+          - bookworm
+          - noble
       BUILD_MINIMAL:
-        description: 最小化内核（推荐 yes）
+        description: 构建最小化镜像（推荐 yes，加快编译）
         default: "yes"
         type: choice
         options:
-          - yes
-          - no
+          - "yes"
+          - "no"
       PRERELEASE:
         description: 标记为预发布（Pre-release）
         default: "true"
@@ -24,148 +26,225 @@ on:
           - "true"
           - "false"
 
-# 发布 Release 需要写仓库内容权限
 permissions:
   contents: write
 
 env:
   BOARD: onecloud
   BRANCH: current
-  ARCH_ROOTFS: arch-rootfs.tar.gz
+  ARCH_ROOTFS_URL: https://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+  UBOOT_REPO: hzyitc/u-boot-onecloud
+  UBOOT_TAG: latest
+  UBOOT_BURNIMG: eMMC.burn.img
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
     timeout-minutes: 360
     steps:
       - name: 检出仓库
         uses: actions/checkout@v4
 
-      - name: 扩容磁盘（GitHub Runner 默认磁盘偏小，必须先扩容）
+      - name: 扩容磁盘
         uses: easimon/maximize-build-space@master
         with:
-          root-reserve-mb: 8192
+          root-reserve-mb: 10240
           swap-size-mb: 4096
-          remove-dotnet: 'true'
-          remove-android: 'true'
-          remove-haskell: 'true'
+          remove-dotnet: "true"
+          remove-android: "true"
+          remove-haskell: "true"
+          remove-codeql: "true"
+          remove-docker-images: "true"
 
-      - name: 安装编译与打包依赖
+      - name: 安装依赖
         run: |
-          sudo apt update
-          sudo apt install -y \
-            git make kpartx rsync qemu-user-static \
-            dosfstools e2fsprogs unzip wget \
-            binutils file
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            git curl wget ca-certificates \
+            qemu-user-static binfmt-support \
+            kpartx dosfstools e2fsprogs \
+            android-sdk-libsparse-utils \
+            rsync xz-utils file
+          # AmlImg 用于打包 Amlogic 线刷包
+          curl -L -o ./AmlImg https://github.com/hzyitc/AmlImg/releases/download/v0.3.1/AmlImg_v0.3.1_linux_amd64
+          chmod +x ./AmlImg
+          sudo mv ./AmlImg /usr/local/bin/AmlImg
 
-      - name: 拉取 hzyitc Armbian build（含玩客云 onecloud 适配补丁）
+      - name: 拉取 Armbian 官方构建框架
         run: |
-          git clone --depth=1 https://github.com/hzyitc/build.git
-          cd build
-          # 国内网络差时可取消下面注释做加速替换
-          # find . -type f \( -name "*.sh" -o -name "*.conf" \) -exec sed -i 's/github.com/github.com.cnpmjs.org/g' {} \;
+          git clone --depth=1 https://github.com/armbian/build.git
 
       - name: 下载 ArchLinuxARM aarch64 根文件系统
         run: |
-          cd build
-          wget -q https://mirror.archlinuxarm.org/aarch64/os/ArchLinuxARM-aarch64-latest.tar.gz
-          mv ArchLinuxARM-aarch64-latest.tar.gz "${{ env.ARCH_ROOTFS }}"
-          ls -lh "${{ env.ARCH_ROOTFS }}"
+          wget -q --show-progress -O arch-rootfs.tar.gz "${{ env.ARCH_ROOTFS_URL }}"
+          ls -lh arch-rootfs.tar.gz
 
-      - name: 编译内核 / u-boot / dtb / 镜像框架
+      - name: 编译 Armbian 镜像框架（内核 / u-boot / dtb / 分区布局）
         run: |
           cd build
-          ./compile.sh \
+          sudo ./compile.sh build \
+            ALLOW_ROOT=yes \
             BOARD=${{ env.BOARD }} \
             BRANCH=${{ env.BRANCH }} \
             RELEASE=${{ github.event.inputs.RELEASE }} \
             BUILD_MINIMAL=${{ github.event.inputs.BUILD_MINIMAL }} \
             BUILD_DESKTOP=no \
-            KERNEL_ONLY=yes \
             KERNEL_CONFIGURE=no \
-            COMPRESS_OUTPUTIMAGE=sha,gz,img,burn
+            COMPRESS_OUTPUTIMAGE=img \
+            EXPERT=yes
+          sudo chown -R "$(id -u):$(id -g)" output/
 
-      - name: 替换 rootfs 为 ArchLinuxARM（SD 镜像 + burn 线刷包）
+      - name: 替换 SD 镜像 rootfs 为 ArchLinuxARM
         run: |
-          set -e
-          cd build
+          set -euo pipefail
 
-          IMG=$(find output/images -name "*.img" ! -name "*.burn.img" | head -1)
-          BURNIMG=$(find output/images -name "*.burn.img" | head -1)
-          if [ -z "$IMG" ] || [ -z "$BURNIMG" ]; then
-            echo "::error::未生成 SD 镜像或 burn 线刷包，请检查上方编译日志"
+          IMG=$(find build/output/images -name "*.img" ! -name "*.burn.img" | head -n1)
+          if [ -z "$IMG" ]; then
+            echo "::error::未找到编译生成的 .img 镜像"
+            ls -R build/output || true
             exit 1
           fi
           echo "SD 镜像: $IMG"
-          echo "Burn 线刷包: $BURNIMG"
 
-          # ---------- 通用：解压 Arch rootfs 到指定挂载点 ----------
-          prepare_rootfs() {
-            local mnt="$1"          # rootfs 挂载点
-            local root_dev="$2"     # fstab 根分区设备
-            local boot_dev="$3"     # fstab boot 分区设备
-            local boot_mounted="$4" # yes/no：boot 分区是否已单独挂载
-
-            sudo rm -rf "${mnt:?}"/*
-            sudo tar -xpf "${{ env.ARCH_ROOTFS }}" -C "$mnt"
-
-            printf '%s\n' \
-              "$root_dev  /      ext4  defaults  0 1" \
-              "$boot_dev  /boot  vfat   defaults  0 2" \
-              | sudo tee "$mnt/etc/fstab" >/dev/null
-
-            printf 'onecloud-arch\n' | sudo tee "$mnt/etc/hostname" >/dev/null
-
-            # ArchLinuxARM 国内镜像源（中科大）
-            printf 'Server = https://mirrors.ustc.edu.cn/archlinuxarm/$arch/$repo\n' \
-              | sudo tee "$mnt/etc/pacman.d/mirrorlist" >/dev/null
-
-            sudo cp /usr/bin/qemu-aarch64-static "$mnt/usr/bin/"
-            sudo chroot "$mnt" /bin/bash -c \
-              "pacman-key --init && pacman-key --populate archlinuxarm && passwd -d root && systemctl enable sshd"
-
-            if [ "$boot_mounted" = "yes" ]; then
-              sudo umount "$mnt/boot"
-            fi
-            sudo umount "$mnt"
+          cleanup() {
+            set +e
+            if mountpoint -q /mnt/arch/boot 2>/dev/null; then sudo umount /mnt/arch/boot; fi
+            if mountpoint -q /mnt/arch 2>/dev/null; then sudo umount /mnt/arch; fi
+            if [ -n "${LOOPDEV:-}" ]; then sudo kpartx -dv "$LOOPDEV" 2>/dev/null || true; sudo losetup -d "$LOOPDEV" 2>/dev/null || true; fi
           }
+          trap cleanup EXIT
 
-          # ---------- 处理 SD 镜像（mmcblk0） ----------
-          sudo kpartx -av "$IMG"
+          sudo mkdir -p /mnt/arch
+          LOOPDEV=$(sudo losetup --find --show --partscan "$IMG")
+          echo "LOOPDEV=$LOOPDEV"
           sleep 2
-          SD_ROOT=$(sudo kpartx -l "$IMG" | grep -o 'loop[0-9]*p2' | head -1)
-          SD_BOOT=$(sudo kpartx -l "$IMG" | grep -o 'loop[0-9]*p1' | head -1)
-          sudo mount "/dev/mapper/$SD_ROOT" /mnt
-          sudo mount "/dev/mapper/$SD_BOOT" /mnt/boot
-          prepare_rootfs /mnt /dev/mmcblk0p2 /dev/mmcblk0p1 yes
-          sudo kpartx -dv "$IMG"
-          gzip -kf "$IMG"
-
-          # ---------- 处理 burn.img 线刷包（eMMC，mmcblk1） ----------
-          sudo kpartx -av "$BURNIMG"
+          sudo kpartx -av "$LOOPDEV"
           sleep 2
-          BURN_ROOT=$(sudo kpartx -l "$BURNIMG" | grep -o 'loop[0-9]*p2' | head -1)
-          BURN_BOOT=$(sudo kpartx -l "$BURNIMG" | grep -o 'loop[0-9]*p1' | head -1)
-          sudo mount "/dev/mapper/$BURN_ROOT" /mnt
-          sudo mount "/dev/mapper/$BURN_BOOT" /mnt/boot
-          prepare_rootfs /mnt /dev/mmcblk1p2 /dev/mmcblk1p1 yes
-          sudo kpartx -dv "$BURNIMG"
 
-      - name: 生成 SHA256 校验文件
+          # 自动识别 p1(boot,vfat) 和 p2(root,ext4)
+          MAP_BASE=$(basename "$LOOPDEV")
+          BOOT_PART="/dev/mapper/${MAP_BASE}p1"
+          ROOT_PART="/dev/mapper/${MAP_BASE}p2"
+          [ -b "$BOOT_PART" ] || { echo "::error::未找到 boot 分区 $BOOT_PART"; exit 1; }
+          [ -b "$ROOT_PART" ] || { echo "::error::未找到 root 分区 $ROOT_PART"; exit 1; }
+
+          sudo mount "$ROOT_PART" /mnt/arch
+          sudo mkdir -p /mnt/arch/boot
+          sudo mount "$BOOT_PART" /mnt/arch/boot
+
+          # 清空 rootfs（保留已挂载的 /boot 分区内容）
+          sudo find /mnt/arch -mindepth 1 -maxdepth 1 ! -name boot -exec rm -rf {} +
+          sudo find /mnt/arch/boot -mindepth 1 -delete 2>/dev/null || true
+
+          # 解压 ArchLinuxARM rootfs
+          sudo tar -xpf arch-rootfs.tar.gz -C /mnt/arch
+
+          # fstab（SD 卡启动：mmcblk0）
+          cat <<'EOF' | sudo tee /mnt/arch/etc/fstab >/dev/null
+/dev/mmcblk0p2  /      ext4  defaults,noatime  0 1
+/dev/mmcblk0p1  /boot  vfat  defaults          0 2
+EOF
+
+          echo "onecloud-arch" | sudo tee /mnt/arch/etc/hostname >/dev/null
+          # 国内镜像源
+          echo 'Server = https://mirrors.ustc.edu.cn/archlinuxarm/$arch/$repo' | sudo tee /mnt/arch/etc/pacman.d/mirrorlist >/dev/null
+
+          # chroot 初始化（设置 root 空密码、启用 sshd）
+          sudo cp /usr/bin/qemu-aarch64-static /mnt/arch/usr/bin/
+          sudo mount --bind /dev /mnt/arch/dev
+          sudo mount --bind /dev/pts /mnt/arch/dev/pts
+          sudo mount -t proc proc /mnt/arch/proc
+          sudo mount -t sysfs sys /mnt/arch/sys
+          sudo rm -f /mnt/arch/etc/resolv.conf
+          echo "nameserver 223.5.5.5" | sudo tee /mnt/arch/etc/resolv.conf >/dev/null
+
+          sudo chroot /mnt/arch /usr/bin/qemu-aarch64-static /bin/bash -euc '
+            pacman-key --init
+            pacman-key --populate archlinuxarm
+            # 安装 openssh（基础包不一定包含/启用）
+            pacman -Sy --noconfirm --needed openssh
+            systemctl enable sshd
+            passwd -d root
+          '
+
+          sudo rm -f /mnt/arch/usr/bin/qemu-aarch64-static
+          sudo rm -f /mnt/arch/etc/resolv.conf
+
+          sync
+          sudo umount /mnt/arch/sys /mnt/arch/proc /mnt/arch/dev/pts /mnt/arch/dev
+          sudo umount /mnt/arch/boot
+          sudo umount /mnt/arch
+          sudo kpartx -dv "$LOOPDEV"
+          sudo losetup -d "$LOOPDEV"
+          unset LOOPDEV
+          trap - EXIT
+
+          echo "IMG_PATH=$IMG" >> "$GITHUB_ENV"
+          echo "IMG_BASENAME=$(basename "$IMG" .img)" >> "$GITHUB_ENV"
+
+      - name: 生成 eMMC 线刷包（burn.img）
         run: |
-          cd build/output/images
-          ls -lh
-          sha256sum *.img.gz *.burn.img 2>/dev/null | tee SHA256SUMS.txt
+          set -euo pipefail
+          IMG="${IMG_PATH}"
+          WORKDIR="$(pwd)/burn-work"
+          mkdir -p "$WORKDIR"
 
-      - name: 生成 Release 说明文档
+          # 下载 u-boot 线刷底包并解包
+          curl -L -o "$WORKDIR/uboot.img" "https://github.com/${UBOOT_REPO}/releases/download/${UBOOT_TAG}/${UBOOT_BURNIMG}"
+          (cd "$WORKDIR" && AmlImg unpack ./uboot.img burn)
+
+          # 线刷写入 eMMC，root 分区应为 mmcblk1；临时修改 fstab 后再导出分区
+          LOOPDEV=$(sudo losetup --find --show --partscan "$IMG")
+          sleep 2
+          sudo mkdir -p /mnt/burnroot
+          sudo mount "${LOOPDEV}p2" /mnt/burnroot
+          sudo sed -i 's|/dev/mmcblk0p2|/dev/mmcblk1p2|g; s|/dev/mmcblk0p1|/dev/mmcblk1p1|g' /mnt/burnroot/etc/fstab
+          sync
+          sudo umount /mnt/burnroot
+
+          sudo img2simg "${LOOPDEV}p1" "$WORKDIR/burn/boot.simg"
+          sudo img2simg "${LOOPDEV}p2" "$WORKDIR/burn/rootfs.simg"
+
+          # 恢复为 SD 启动用 fstab（mmcblk0）
+          sudo mount "${LOOPDEV}p2" /mnt/burnroot
+          sudo sed -i 's|/dev/mmcblk1p2|/dev/mmcblk0p2|g; s|/dev/mmcblk1p1|/dev/mmcblk0p1|g' /mnt/burnroot/etc/fstab
+          sync
+          sudo umount /mnt/burnroot
+          sudo losetup -d "$LOOPDEV"
+          sudo chown "$(id -u):$(id -g)" "$WORKDIR"/burn/*.simg
+
+          # 生成校验与写入命令
+          (cd "$WORKDIR/burn" && \
+            echo -n "sha1sum $(sha1sum boot.simg | awk '{print $1}')" > boot.VERIFY && \
+            echo -n "sha1sum $(sha1sum rootfs.simg | awk '{print $1}')" > rootfs.VERIFY && \
+            printf 'PARTITION:boot:sparse:boot.simg\nVERIFY:boot:normal:boot.VERIFY\nPARTITION:rootfs:sparse:rootfs.simg\nVERIFY:rootfs:normal:rootfs.VERIFY\n' >> commands.txt)
+
+          OUT_DIR="build/output/images"
+          BURN_IMG="${OUT_DIR}/${IMG_BASENAME}.burn.img"
+          AmlImg pack "$BURN_IMG" "$WORKDIR/burn"
+          echo "BURN_IMG=$BURN_IMG" >> "$GITHUB_ENV"
+          ls -lh "$OUT_DIR"
+
+      - name: 压缩镜像并生成校验
+        run: |
+          set -euo pipefail
+          cd build/output/images
+          # 压缩 SD 镜像
+          xz -T0 -9 -k "${IMG_BASENAME}.img"
+          # 生成校验（对发布文件）
+          sha256sum "${IMG_BASENAME}.img.xz" "${IMG_BASENAME}.burn.img" > SHA256SUMS.txt
+          ls -lh
+          cat SHA256SUMS.txt
+
+      - name: 生成 Release 说明
         run: |
           cd build/output/images
           {
             echo "# 玩客云 OneCloud ArchLinuxARM 固件"
             echo
             echo "- 设备：玩客云（Amlogic S805 / meson8b，AArch64）"
-            echo "- 系统：ArchLinuxARM aarch64（rootfs 来自官方 ArchLinuxARM 基础包）"
-            echo "- 内核 / u-boot / 设备树：hzyitc onecloud 适配分支"
+            echo "- 系统：ArchLinuxARM aarch64（官方 rootfs）"
+            echo "- 内核 / u-boot / 设备树：Armbian 官方构建（onecloud / current）"
             echo "- 编译时间：$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %Z')"
             echo "- 工作流：${{ github.workflow }} #${{ github.run_number }}"
             echo "- 提交：${{ github.sha }}"
@@ -174,9 +253,9 @@ jobs:
             echo
             echo "| 文件 | 说明 |"
             echo "| --- | --- |"
-            echo "| \`*.img.gz\` | SD / U 盘启动镜像，用 balenaEtcher / Rufus 写入存储卡 |"
-            echo "| \`*.burn.img\` | eMMC 线刷包，用 Amlogic USB Burning Tool v2.1.3 烧录 |"
-            echo "| \`SHA256SUMS.txt\` | 全部固件的 SHA256 校验值 |"
+            echo "| \`${IMG_BASENAME}.img.xz\` | SD / U 盘启动镜像，解压后用 balenaEtcher / Rufus 写入 |"
+            echo "| \`${IMG_BASENAME}.burn.img\` | eMMC 线刷包，用 Amlogic USB Burning Tool v2.1.3 烧录 |"
+            echo "| \`SHA256SUMS.txt\` | SHA256 校验值 |"
             echo
             echo "## 文件校验值"
             echo
@@ -187,55 +266,41 @@ jobs:
             echo "## 首次登录"
             echo
             echo "- 默认用户：\`root\`，默认密码：空（直接回车）"
-            echo "- 插网线后在路由器后台查看 IP，或用 \`arp-scan\` / 路由器设备列表查找"
-            echo "- 登录后立即执行：\`passwd root\` 设置密码"
-            echo "- SSH 已默认开启；串口调试：\`ttyAML0,115200n8\`"
+            echo "- SSH 已开启；首次登录后请立即执行 \`passwd root\`"
+            echo "- 串口：\`ttyAML0,115200n8\`"
             echo
             echo "## 刷机方式"
             echo
-            echo "### 方式一：SD / U 盘启动（推荐先试）"
-            echo "1. 解压 \`*.img.gz\`"
-            echo "2. 用 balenaEtcher 把镜像写入 SD 卡或 U 盘"
-            echo "3. 插卡上电，从存储卡引导"
+            echo "### SD / U 盘启动"
+            echo "1. 解压 \`.img.xz\` 得到 \`.img\`"
+            echo "2. 用 balenaEtcher 写入 SD 卡 / U 盘，上电启动"
+            echo "3. SD 启动时 root 分区为 \`/dev/mmcblk0p2\`"
             echo
-            echo "### 方式二：eMMC 线刷（burn.img）"
-            echo "1. 打开 Amlogic USB Burning Tool **v2.1.3**（新版工具容易报错）"
-            echo "2. 导入 \`*.burn.img\`，勾选擦除 flash / 擦除 bootloader"
-            echo "3. 双公 USB 线连接电脑与玩客云，短接 / 按键进入升级模式"
-            echo "4. 等待烧录完成后拔线上电"
-            echo
-            echo "## 常用命令"
-            echo
-            echo '```bash'
-            echo "pacman -Syu                 # 系统更新"
-            echo "pacman -S docker samba      # 安装软件"
-            echo "systemctl status sshd       # 查看 SSH 状态"
-            echo "uname -a                    # 查看内核版本"
-            echo '```'
+            echo "### eMMC 线刷"
+            echo "1. 使用 Amlogic USB Burning Tool **v2.1.3** 导入 \`.burn.img\`"
+            echo "2. 勾选擦除 flash / 擦除 bootloader，短接进入升级模式后烧录"
+            echo "3. eMMC 启动时 root 分区为 \`/dev/mmcblk1p2\`"
             echo
             echo "## 已知注意事项"
             echo
-            echo "- S805 为 AArch64，请勿混入 armv7 软件包"
-            echo "- 内核与 u-boot 依赖 hzyitc 适配补丁，主线内核 / 通用 u-boot 无法驱动网卡、USB 与 eMMC"
-            echo "- ArchLinuxARM 本身不含 meson 固件，已由编译框架从适配分支带入"
-            echo "- 线刷包与 SD 镜像分区设备号不同（eMMC=mmcblk1，SD=mmcblk0），fstab 已分别处理"
+            echo "- S805 为 AArch64 架构，请勿混入 armv7 软件包"
+            echo "- 若 pacman 初始化在首次启动未完成，可手动执行：\`pacman-key --init && pacman-key --populate archlinuxarm\`"
+            echo "- 首次启动后建议：\`timedatectl set-timezone Asia/Shanghai && pacman -Syu\`"
           } > RELEASE_NOTES.md
           cat RELEASE_NOTES.md
 
-      - name: 上传构建产物到 Artifacts（留存 30 天）
+      - name: 上传构建产物到 Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: onecloud-arch-firmware
           path: |
-            build/output/images/*.img
-            build/output/images/*.img.gz
-            build/output/images/*.burn.img
+            build/output/images/${{ env.IMG_BASENAME }}.img.xz
+            build/output/images/${{ env.IMG_BASENAME }}.burn.img
             build/output/images/SHA256SUMS.txt
             build/output/images/RELEASE_NOTES.md
           retention-days: 30
 
       - name: 发布到 GitHub Release
-        id: release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: onecloud-arch-${{ github.run_number }}
@@ -243,7 +308,7 @@ jobs:
           body_path: build/output/images/RELEASE_NOTES.md
           prerelease: ${{ github.event.inputs.PRERELEASE }}
           files: |
-            build/output/images/*.img.gz
-            build/output/images/*.burn.img
+            build/output/images/${{ env.IMG_BASENAME }}.img.xz
+            build/output/images/${{ env.IMG_BASENAME }}.burn.img
             build/output/images/SHA256SUMS.txt
             build/output/images/RELEASE_NOTES.md
