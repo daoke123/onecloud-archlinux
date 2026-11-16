@@ -33,10 +33,10 @@ env:
   BOARD: onecloud
   BRANCH: current
   ARCH_ROOTFS_URLS: >-
-    https://mirrors.ustc.edu.cn/archlinuxarm/os/ArchLinuxARM-aarch64-latest.tar.gz
-    https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/os/ArchLinuxARM-aarch64-latest.tar.gz
-    https://mirror.archlinuxarm.org/aarch64/os/ArchLinuxARM-aarch64-latest.tar.gz
-    http://os.archlinuxarm.org/os/ArchLinuxARM-aarch64-latest.tar.gz
+    https://mirrors.ustc.edu.cn/archlinuxarm/os/ArchLinuxARM-armv7-latest.tar.gz
+    https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/os/ArchLinuxARM-armv7-latest.tar.gz
+    https://mirror.archlinuxarm.org/armv7/os/ArchLinuxARM-armv7-latest.tar.gz
+    http://os.archlinuxarm.org/os/ArchLinuxARM-armv7-latest.tar.gz
   UBOOT_REPO: hzyitc/u-boot-onecloud
   UBOOT_TAG: latest
   UBOOT_BURNIMG: eMMC.burn.img
@@ -84,7 +84,7 @@ jobs:
         run: |
           git clone --depth=1 https://github.com/armbian/build.git
 
-      - name: 下载 ArchLinuxARM aarch64 根文件系统
+      - name: 下载 ArchLinuxARM armv7 根文件系统
         run: |
           set -euo pipefail
           URLS="${{ env.ARCH_ROOTFS_URLS }}"
@@ -204,7 +204,7 @@ jobs:
           echo 'Server = https://mirrors.ustc.edu.cn/archlinuxarm/$arch/$repo' | sudo tee /mnt/arch/etc/pacman.d/mirrorlist >/dev/null
 
           # chroot 初始化（设置 root 空密码、启用 sshd）
-          sudo cp /usr/bin/qemu-aarch64-static /mnt/arch/usr/bin/
+          sudo cp /usr/bin/qemu-arm-static /mnt/arch/usr/bin/
           sudo mount --bind /dev /mnt/arch/dev
           sudo mount --bind /dev/pts /mnt/arch/dev/pts
           sudo mount -t proc proc /mnt/arch/proc
@@ -219,10 +219,10 @@ jobs:
             printf '\n[options]\nDisableSandbox\n' | sudo tee -a /mnt/arch/etc/pacman.conf >/dev/null
           fi
 
-          sudo chroot /mnt/arch /usr/bin/qemu-aarch64-static /bin/bash -euc \
+          sudo chroot /mnt/arch /usr/bin/qemu-arm-static /bin/bash -euc \
             'pacman-key --init; pacman-key --populate archlinuxarm; pacman -Sy --noconfirm --needed openssh; systemctl enable sshd; passwd -d root'
 
-          sudo rm -f /mnt/arch/usr/bin/qemu-aarch64-static
+          sudo rm -f /mnt/arch/usr/bin/qemu-arm-static
           sudo rm -f /mnt/arch/etc/resolv.conf
 
           sync
@@ -286,8 +286,8 @@ jobs:
           {
             echo "# 玩客云 OneCloud ArchLinuxARM 固件（仅 Burn 线刷包）"
             echo
-            echo "- 设备：玩客云（Amlogic S805 / meson8b，AArch64）"
-            echo "- 系统：ArchLinuxARM aarch64（官方 rootfs）"
+            echo "- 设备：玩客云（Amlogic S805 / meson8b，ARMv7 32 位）"
+            echo "- 系统：ArchLinuxARM armv7（官方 rootfs，32 位 ARMv7）"
             echo "- 内核 / u-boot / 设备树：Armbian 官方构建（onecloud / current）"
             echo "- 编译时间：$(TZ=Asia/Shanghai date '+%Y-%m-%d %H:%M:%S %Z')"
             echo "- 工作流：${{ github.workflow }} #${{ github.run_number }}"
@@ -325,7 +325,7 @@ jobs:
             echo
             echo "## 已知注意事项"
             echo
-            echo "- S805 为 AArch64 架构，请勿混入 armv7 软件包"
+            echo "- S805 为 32 位 ARMv7（armv7h），请勿混入 aarch64 / 64 位软件包"
             echo "- 若 pacman 初始化在首次启动未完成，可手动执行：\`pacman-key --init && pacman-key --populate archlinuxarm\`"
             echo "- 首次启动后建议：\`timedatectl set-timezone Asia/Shanghai && pacman -Syu\`"
           } > RELEASE_NOTES.md
