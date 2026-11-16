@@ -219,20 +219,30 @@ jobs:
             printf '\n[options]\nDisableSandbox\n' | sudo tee -a /mnt/arch/etc/pacman.conf >/dev/null
           fi
 
-          sudo chroot /mnt/arch /usr/bin/qemu-arm-static /bin/bash -euc \
-            'pacman-key --init; pacman-key --populate archlinuxarm; pacman -Sy --noconfirm --needed openssh; systemctl enable sshd; passwd -d root'
+          # 在 chroot 中初始化 pacman 并安装 openssh（避免依赖冲突，使用 --noconfirm --overwrite）
+          sudo chroot /mnt/arch /usr/bin/qemu-arm-static /bin/bash -euc '
+            pacman-key --init; pacman-key --populate archlinuxarm
+            pacman -Sy --noconfirm --needed --overwrite "*"
+            pacman -S --noconfirm --needed --overwrite "*" openssh
+            systemctl enable sshd
+            passwd -d root
+          '
 
           sudo rm -f /mnt/arch/usr/bin/qemu-arm-static
           sudo rm -f /mnt/arch/etc/resolv.conf
 
+          # 等待所有 chroot 子进程完全退出后再清理挂载点与 loop 设备
+          sleep 2
           sync
-          sudo umount /mnt/arch/sys /mnt/arch/proc /mnt/arch/dev/pts /mnt/arch/dev
-          sudo umount /mnt/arch/boot
-          sudo umount /mnt/arch
-          sudo kpartx -dv "$LOOPDEV"
-          sudo losetup -d "$LOOPDEV"
-          unset LOOPDEV
-          trap - EXIT
+          sudo umount -R /mnt/arch 2>/dev/null || true
+          sync
+          sleep 1
+
+          if [ -n "${LOOPDEV:-}" ]; then
+            sudo kpartx -dv "$LOOPDEV" 2>/dev/null || true
+            sudo losetup -d "$LOOPDEV" 2>/dev/null || true
+            unset LOOPDEV
+          fi
 
           echo "IMG_PATH=$IMG" >> "$GITHUB_ENV"
           echo "IMG_BASENAME=$(basename "$IMG" .img)" >> "$GITHUB_ENV"
