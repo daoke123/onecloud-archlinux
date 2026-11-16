@@ -221,7 +221,9 @@ jobs:
           fi
 
           # 在 chroot 中初始化 pacman 并安装 openssh（避免依赖冲突，使用 --noconfirm --overwrite）
-          sudo chroot /mnt/arch /usr/bin/qemu-arm-static /bin/bash -euc '
+          sudo chroot /mnt/arch /bin/bash -euc '
+            export CARCH=armv7h
+            export CARCHFLAGS="-march=armv7a -mfpu=neon -mfloat-abi=hard"
             pacman-key --init; pacman-key --populate archlinuxarm
             pacman -Sy --noconfirm --needed --overwrite "*"
             pacman -S --noconfirm --needed --overwrite "*" openssh
