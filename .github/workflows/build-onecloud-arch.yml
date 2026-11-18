@@ -158,11 +158,24 @@ jobs:
           cleanup() {
             set +e
             sync
-            for m in /mnt/arch/sys /mnt/arch/proc /mnt/arch/dev/pts /mnt/arch/dev /mnt/arch/boot /mnt/arch; do
-              if mountpoint -q "$m" 2>/dev/null; then sudo umount -l "$m" 2>/dev/null || sudo umount "$m" 2>/dev/null || true; fi
-            done
+            # 尽量终止 chroot 内可能残留的进程，避免 loop 设备忙
+            if [ -d /mnt/arch ]; then
+              for m in /mnt/arch/sys /mnt/arch/proc /mnt/arch/dev/pts /mnt/arch/dev /mnt/arch/boot /mnt/arch; do
+                if mountpoint -q "$m" 2>/dev/null; then
+                  sudo fuser -km "$m" 2>/dev/null || true
+                fi
+              done
+              sleep 1
+              for m in /mnt/arch/sys /mnt/arch/proc /mnt/arch/dev/pts /mnt/arch/dev /mnt/arch/boot /mnt/arch; do
+                if mountpoint -q "$m" 2>/dev/null; then
+                  sudo umount -R "$m" 2>/dev/null || sudo umount -l "$m" 2>/dev/null || sudo umount "$m" 2>/dev/null || true
+                fi
+              done
+            fi
+            sleep 1
             if [ -n "${LOOPDEV:-}" ]; then
               sudo kpartx -dv "$LOOPDEV" 2>/dev/null || true
+              sleep 1
               sudo losetup -d "$LOOPDEV" 2>/dev/null || true
             fi
           }
@@ -204,6 +217,29 @@ jobs:
           # 国内镜像源（直接使用 armv7h，避免 pacman 在 chroot 中 $arch 未展开）
           echo 'Server = https://mirrors.ustc.edu.cn/archlinuxarm/armv7h/$repo' | sudo tee /mnt/arch/etc/pacman.d/mirrorlist >/dev/null
 
+          # 强制 pacman 架构为 armv7h，避免在 x86_64 Runner + qemu 环境下误判
+          if grep -q '^Architecture' /mnt/arch/etc/pacman.conf; then
+            sudo sed -i 's/^Architecture.*/Architecture = armv7h/' /mnt/arch/etc/pacman.conf
+          elif grep -q '^\[options\]' /mnt/arch/etc/pacman.conf; then
+            sudo sed -i '/^\[options\]/a Architecture = armv7h' /mnt/arch/etc/pacman.conf
+          else
+            printf '\n[options]\nArchitecture = armv7h\n' | sudo tee -a /mnt/arch/etc/pacman.conf >/dev/null
+          fi
+
+          # 新版 pacman 在无 Landlock/沙箱能力的环境（如 Runner+chroot）可能失败
+          if ! grep -q '^DisableSandbox' /mnt/arch/etc/pacman.conf; then
+            if grep -q '^\[options\]' /mnt/arch/etc/pacman.conf; then
+              sudo sed -i '/^\[options\]/a DisableSandbox' /mnt/arch/etc/pacman.conf
+            else
+              printf '\n[options]\nDisableSandbox\n' | sudo tee -a /mnt/arch/etc/pacman.conf >/dev/null
+            fi
+          fi
+
+          echo "=== pacman.conf (Architecture/DisableSandbox) ==="
+          sudo grep -nE '^(Architecture|DisableSandbox|\[options\])' /mnt/arch/etc/pacman.conf || true
+          echo "=== mirrorlist ==="
+          sudo cat /mnt/arch/etc/pacman.d/mirrorlist
+
           # chroot 初始化（设置 root 空密码、启用 sshd）
           sudo cp /usr/bin/qemu-arm-static /mnt/arch/usr/bin/
           sudo mount --bind /dev /mnt/arch/dev
@@ -213,20 +249,20 @@ jobs:
           sudo rm -f /mnt/arch/etc/resolv.conf
           echo "nameserver 223.5.5.5" | sudo tee /mnt/arch/etc/resolv.conf >/dev/null
 
-          # 新版 pacman 在无 Landlock/沙箱能力的环境（如 Runner+chroot）可能失败
-          if grep -q '^\[options\]' /mnt/arch/etc/pacman.conf; then
-            sudo sed -i '/^\[options\]/a DisableSandbox' /mnt/arch/etc/pacman.conf
-          else
-            printf '\n[options]\nDisableSandbox\n' | sudo tee -a /mnt/arch/etc/pacman.conf >/dev/null
-          fi
-
-          # 在 chroot 中初始化 pacman 并安装 openssh（避免依赖冲突，使用 --noconfirm --overwrite）
-          sudo chroot /mnt/arch /bin/bash -euc '
+          # 在 chroot 中初始化 pacman 并安装 openssh
+          # Arch/ALARM 不支持部分升级：同步数据库后必须全量升级再安装软件包，避免 openssl/soname 冲突
+          sudo chroot /mnt/arch /usr/bin/qemu-arm-static /bin/bash -euc '
             export CARCH=armv7h
             export CARCHFLAGS="-march=armv7a -mfpu=neon -mfloat-abi=hard"
-            pacman-key --init; pacman-key --populate archlinuxarm
-            pacman -Sy --noconfirm --needed --overwrite "*"
-            pacman -S --noconfirm --needed --overwrite "*" openssh
+            echo "=== chroot uname ==="; uname -m || true
+            echo "=== pacman-conf Architecture ==="; (pacman-conf Architecture 2>/dev/null || grep "^Architecture" /etc/pacman.conf || true)
+
+            pacman-key --init
+            pacman-key --populate archlinuxarm
+
+            # 强制刷新并全量升级，确保与当前仓库一致；同时安装 openssh
+            pacman -Syyu --noconfirm --needed --overwrite "*" openssh
+
             systemctl enable sshd
             passwd -d root
           '
@@ -235,17 +271,29 @@ jobs:
           sudo rm -f /mnt/arch/etc/resolv.conf
 
           # 等待所有 chroot 子进程完全退出后再清理挂载点与 loop 设备
-          sleep 2
           sync
-          sudo umount -R /mnt/arch 2>/dev/null || true
+          sleep 2
+          for m in /mnt/arch/sys /mnt/arch/proc /mnt/arch/dev/pts /mnt/arch/dev /mnt/arch/boot /mnt/arch; do
+            if mountpoint -q "$m" 2>/dev/null; then
+              sudo fuser -km "$m" 2>/dev/null || true
+            fi
+          done
+          sleep 1
+          for m in /mnt/arch/sys /mnt/arch/proc /mnt/arch/dev/pts /mnt/arch/dev /mnt/arch/boot /mnt/arch; do
+            if mountpoint -q "$m" 2>/dev/null; then
+              sudo umount -R "$m" 2>/dev/null || sudo umount -l "$m" 2>/dev/null || sudo umount "$m" 2>/dev/null || true
+            fi
+          done
           sync
           sleep 1
 
           if [ -n "${LOOPDEV:-}" ]; then
             sudo kpartx -dv "$LOOPDEV" 2>/dev/null || true
+            sleep 1
             sudo losetup -d "$LOOPDEV" 2>/dev/null || true
             unset LOOPDEV
           fi
+          trap - EXIT
 
           echo "IMG_PATH=$IMG" >> "$GITHUB_ENV"
           echo "IMG_BASENAME=$(basename "$IMG" .img)" >> "$GITHUB_ENV"
