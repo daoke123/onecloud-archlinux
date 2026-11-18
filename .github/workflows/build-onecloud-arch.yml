@@ -37,8 +37,9 @@ env:
     https://mirrors.tuna.tsinghua.edu.cn/archlinuxarm/os/ArchLinuxARM-armv7-latest.tar.gz
     https://mirror.archlinuxarm.org/armv7/os/ArchLinuxARM-armv7-latest.tar.gz
     http://os.archlinuxarm.org/os/ArchLinuxARM-armv7-latest.tar.gz
-  UBOOT_REPO: hzyitc/u-boot-onecloud
-  UBOOT_TAG: latest
+  # hzyitc/u-boot-onecloud 已迁移/重定向，eMMC.burn.img 现位于 hzyitc/u-boot 的 build-* 发布中
+  UBOOT_REPO: hzyitc/u-boot
+  UBOOT_TAG: build-20221028-0940
   UBOOT_BURNIMG: eMMC.burn.img
 
 jobs:
@@ -299,21 +300,73 @@ jobs:
           echo "IMG_BASENAME=$(basename "$IMG" .img)" >> "$GITHUB_ENV"
 
       - name: 生成 eMMC 线刷包（burn.img）
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           IMG="${IMG_PATH}"
           WORKDIR="$(pwd)/burn-work"
           mkdir -p "$WORKDIR"
 
-          # 下载 u-boot 线刷底包并解包
-          curl -L -o "$WORKDIR/uboot.img" "https://github.com/${UBOOT_REPO}/releases/download/${UBOOT_TAG}/${UBOOT_BURNIMG}"
-          (cd "$WORKDIR" && AmlImg unpack ./uboot.img burn)
+          download_uboot() {
+            local out="$1" url="$2"
+            rm -f "$out"
+            if curl -fL --retry 3 --retry-delay 5 --connect-timeout 20 --max-time 300 -o "$out" "$url"; then
+              if [ -s "$out" ] && [ "$(wc -c < "$out")" -gt 10240 ]; then
+                return 0
+              fi
+              echo "下载内容异常（文件过小）: $url"
+            else
+              echo "下载失败: $url"
+            fi
+            return 1
+          }
+
+          # 下载 u-boot 线刷底包并解包（带校验与回退）
+          UBOOT_OK=0
+          UBOOT_URL="https://github.com/${UBOOT_REPO}/releases/download/${UBOOT_TAG}/${UBOOT_BURNIMG}"
+          echo "尝试下载 u-boot burn 底包: $UBOOT_URL"
+          if download_uboot "$WORKDIR/uboot.img" "$UBOOT_URL"; then
+            UBOOT_OK=1
+          else
+            echo "尝试通过 GitHub API 查找包含 ${UBOOT_BURNIMG} 的最新发布..."
+            API_URL="https://api.github.com/repos/${UBOOT_REPO}/releases?per_page=30"
+            FOUND_URL="$(curl -fsSL ${GITHUB_TOKEN:+-H "Authorization: Bearer ${GITHUB_TOKEN}"} "$API_URL" | UBOOT_BURNIMG="${UBOOT_BURNIMG}" python3 -c 'import sys,json,os; name=os.environ.get("UBOOT_BURNIMG","eMMC.burn.img"); d=json.load(sys.stdin); print(next((a.get("browser_download_url","") for r in (d if isinstance(d,list) else []) for a in (r.get("assets") or []) if a.get("name")==name and a.get("browser_download_url")),""))' 2>/dev/null || true)"
+            if [ -n "$FOUND_URL" ]; then
+              echo "找到候选 u-boot burn 底包: $FOUND_URL"
+              if download_uboot "$WORKDIR/uboot.img" "$FOUND_URL"; then
+                UBOOT_OK=1
+              fi
+            fi
+          fi
+
+          if [ "$UBOOT_OK" -ne 1 ]; then
+            echo "::error::无法下载有效的 u-boot 线刷底包 (${UBOOT_REPO}, ${UBOOT_BURNIMG})"
+            ls -lh "$WORKDIR" || true
+            exit 1
+          fi
+
+          echo "uboot.img 信息:"
+          ls -lh "$WORKDIR/uboot.img"
+          file "$WORKDIR/uboot.img" || true
+
+          if ! (cd "$WORKDIR" && AmlImg unpack ./uboot.img burn); then
+            echo "::error::AmlImg 解包 u-boot 线刷底包失败"
+            exit 1
+          fi
 
           # 从已替换 rootfs 的镜像提取分区并转换为 sparse
           LOOPDEV=$(sudo losetup --find --show --partscan "$IMG")
+          echo "LOOPDEV=$LOOPDEV"
           sleep 2
+          sudo kpartx -av "$LOOPDEV" || true
+          sleep 1
+          [ -b "${LOOPDEV}p1" ] || { echo "::error::未找到 boot 分区 ${LOOPDEV}p1"; lsblk "$LOOPDEV" || true; sudo losetup -d "$LOOPDEV"; exit 1; }
+          [ -b "${LOOPDEV}p2" ] || { echo "::error::未找到 root 分区 ${LOOPDEV}p2"; lsblk "$LOOPDEV" || true; sudo losetup -d "$LOOPDEV"; exit 1; }
+
           sudo img2simg "${LOOPDEV}p1" "$WORKDIR/burn/boot.simg"
           sudo img2simg "${LOOPDEV}p2" "$WORKDIR/burn/rootfs.simg"
+          sudo kpartx -dv "$LOOPDEV" 2>/dev/null || true
           sudo losetup -d "$LOOPDEV"
           sudo chown "$(id -u):$(id -g)" "$WORKDIR"/burn/*.simg
 
